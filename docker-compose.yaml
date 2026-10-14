@@ -1,0 +1,12 @@
+services:
+  lever-scraper:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      # Set 0 to skip reading every company into the search index at start-up.
+      - LEVER_INDEX_WARM_AT_START=1
+      # Optional — Lever has no bot protection, so leave this unset.
+      # - LEVER_PROXY=http://user:pass@host:port

@@ -1,0 +1,73 @@
+@baseUrl = http://127.0.0.1:6002
+# @baseUrl = https://lever-scraper.omkar.cloud
+
+# ========================================
+# COMPANIES
+# ========================================
+
+### Company details (profile + hiring stats + filter facets) — slug or any Lever link
+GET {{baseUrl}}/lever/companies/details?company=spotify
+
+### Company details (EU-shard board by link)
+GET {{baseUrl}}/lever/companies/details?company=https://jobs.eu.lever.co/aavelabs
+
+### Company jobs (every open posting, newest first, 20 a page)
+GET {{baseUrl}}/lever/companies/jobs?company=spotify
+
+### Company jobs (keyword + workplace type + sort + page size)
+GET {{baseUrl}}/lever/companies/jobs?company=https://jobs.lever.co/spotify&query=engineer&workplace_type=hybrid&sort=oldest&per_page=5
+
+### Company jobs (team / location / country / posted-since / salary filters)
+GET {{baseUrl}}/lever/companies/jobs?company=spotify&team=Platform&location=Stockholm&country=SE&posted_since=90d
+
+### Company jobs (with full descriptions)
+GET {{baseUrl}}/lever/companies/jobs?company=spotify&per_page=1&include_description=true
+
+### Company jobs (only postings that disclose a salary)
+GET {{baseUrl}}/lever/companies/jobs?company=zoox&has_salary=true
+
+### Companies directory search (known Lever boards)
+GET {{baseUrl}}/lever/companies/search?query=spotify
+
+### Companies directory (hiring in Sweden, 100+ open roles, by name)
+GET {{baseUrl}}/lever/companies/search?country=SE&min_open_jobs=10&sort=name
+
+### Resolve a company to its Lever board — by careers page link
+GET {{baseUrl}}/lever/companies/resolve?company=https://www.wealthfront.com/careers
+
+### Resolve — by name
+GET {{baseUrl}}/lever/companies/resolve?company=Spotify
+
+### Resolve — by domain
+GET {{baseUrl}}/lever/companies/resolve?company=spotify.com
+
+# ========================================
+# JOBS
+# ========================================
+
+### Job details (posting link)
+GET {{baseUrl}}/lever/jobs/details?job=https://jobs.lever.co/palantir/dab396d4-2f14-4796-aac0-0d82883dccf0
+
+### Job details (<company>/<posting id>)
+GET {{baseUrl}}/lever/jobs/details?job=spotify/2193db3f-77c5-43b8-b030-8f92c9882bf1
+
+### Job details (bare posting id + company)
+GET {{baseUrl}}/lever/jobs/details?job=2193db3f-77c5-43b8-b030-8f92c9882bf1&company=spotify
+
+### Job application form (fields, custom questions, demographic surveys)
+GET {{baseUrl}}/lever/jobs/application-form?job=https://jobs.lever.co/palantir/dab396d4-2f14-4796-aac0-0d82883dccf0/apply
+
+### Jobs search across named boards
+GET {{baseUrl}}/lever/jobs/search?companies=spotify,palantir&query=engineer&sort=company
+
+### Jobs search across every indexed board
+GET {{baseUrl}}/lever/jobs/search?query=software engineer&workplace_type=remote&per_page=5
+
+### Jobs search (location + posted in the last 90 days)
+GET {{baseUrl}}/lever/jobs/search?location=London&posted_since=90d
+
+### New postings feed (last 30 days, newest first)
+GET {{baseUrl}}/lever/jobs/new?since=30d&per_page=5
+
+### New postings at named boards since a date
+GET {{baseUrl}}/lever/jobs/new?companies=spotify&since=2026-01-01
