@@ -127,7 +127,7 @@ You're a developer — we know how hard completing a project can be. So we offer
 
 [![Message Us on WhatsApp about Lever Scraper](https://raw.githubusercontent.com/omkarcloud/assets/master/images/whatsapp-us.png)](https://www.omkar.cloud/l/lever-scraper-github-whatsapp)
 
-[![Ask Us by Email about Lever Scraper](https://raw.githubusercontent.com/omkarcloud/assets/master/images/ask-on-email.png)](https://www.omkar.cloud/l/lever-scraper-github-email)
+[![Ask Us by Email about Lever Scraper](https://raw.githubusercontent.com/omkarcloud/assets/master/images/ask-on-email.png)](mailto:happy.to.help@omkar.cloud?subject=Help%20with%20Lever%20Scraper%20API&body=I%20need%20help%20using%20the%20Lever%20Scraper%20API.)
 
 ## ⚡ Popular Scrapers by Omkar Cloud
 
