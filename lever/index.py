@@ -12,13 +12,14 @@ search across boards, so /lever/jobs/search, /lever/jobs/new and
               description — the details endpoint fetches that live), read
               through lever/fetch.py and kept config.LEVER_INDEX_TTL seconds.
 
-  refresher   a daemon thread (started by run.py when the scraper is
-              active) that warms every directory board at start-up
-              (config.LEVER_INDEX_WARM_AT_START) and then re-reads boards as
-              they go stale, LEVER_INDEX_WORKERS at a time — but only while
-              a cross-company endpoint was used in the last
-              LEVER_INDEX_IDLE_AFTER seconds, so an idle service fetches
-              nothing (the trustpilot rule).
+  refresher   a daemon thread started by the FIRST cross-company request
+              (touch()), never at boot, that re-reads boards as they go
+              stale (unread boards count as stale, so the whole directory
+              fills in over the first passes; LEVER_INDEX_WARM_AT_START
+              reads it all in one pass first), LEVER_INDEX_WORKERS at a
+              time — but only while a cross-company endpoint was used in
+              the last LEVER_INDEX_IDLE_AFTER seconds, so an idle service
+              fetches nothing (the trustpilot rule).
 
 A cross-company request never waits for the whole directory: it searches
 the boards loaded so far and reports index coverage (`index` block). Boards
@@ -244,8 +245,12 @@ def ensure(slugs, workers=None):
 
 
 def touch():
+    """Called by every cross-company endpoint: records the use (the refresher
+    idles out LEVER_INDEX_IDLE_AFTER seconds after the last one) and starts
+    the refresher on the first call — nothing runs at boot."""
     global _last_used
     _last_used = time.time()
+    start_refresher()
 
 
 def jobs_of(slugs=None):
@@ -338,7 +343,11 @@ def _refresher_loop(warm):
 
 
 def start_refresher(warm=None):
-    """Start the background refresher once (idempotent)."""
+    """Start the background refresher once (idempotent). Called from touch()
+    on the first cross-company request, not by run.py: an idle service never
+    reads a board. With warm=False (the default, LEVER_INDEX_WARM_AT_START
+    off) the loop's first pass, LEVER_INDEX_REFRESH_POLL seconds later, reads
+    every board still missing or stale."""
     global _refresher_started
     load_directory()
     with _lock:

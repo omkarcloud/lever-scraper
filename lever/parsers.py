@@ -31,11 +31,13 @@ Deliberately dropped as noise or duplicates:
     `all_locations`).
 """
 import html as html_lib
-import json
+import fastjson
 import re
 from datetime import datetime, timedelta, timezone
 
 from lever import refs
+from scraper_utils.text import squashed as text
+from scraper_utils.dates import iso_day as iso_date
 
 SUMMARY_CHARS = 300
 WORKPLACE_TYPES = {"remote": "remote", "hybrid": "hybrid", "on-site": "on_site", "onsite": "on_site",
@@ -63,12 +65,6 @@ _TITLE_RE = re.compile(r"<title>(.*?)</title>", re.S)
 
 
 # ---- value helpers ------------------------------------------------------------
-
-def text(value):
-    if not isinstance(value, str):
-        return None
-    value = " ".join(value.replace("\xa0", " ").split())
-    return value or None
 
 
 def to_int(value):
@@ -131,13 +127,6 @@ def iso_from_ms(value):
         return datetime.fromtimestamp(number / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     except (OverflowError, OSError, ValueError):
         return None
-
-
-def iso_date(value):
-    if not isinstance(value, str):
-        return None
-    match = re.match(r"^(\d{4}-\d{2}-\d{2})", value.strip())
-    return match.group(1) if match else None
 
 
 def parse_iso(value):
@@ -390,7 +379,7 @@ def jsonld(page_html):
     """The schema.org JobPosting block of a hosted posting page, or None."""
     for match in _JSONLD_RE.finditer(page_html or ""):
         try:
-            doc = json.loads(match.group(1))
+            doc = fastjson.loads(match.group(1))
         except ValueError:
             continue
         if isinstance(doc, dict) and doc.get("@type") == "JobPosting":
@@ -439,7 +428,7 @@ def _options(block):
 
 def _template(value):
     try:
-        doc = json.loads(html_lib.unescape(value))
+        doc = fastjson.loads(html_lib.unescape(value))
     except ValueError:
         return None
     return doc if isinstance(doc, dict) else None

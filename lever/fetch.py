@@ -28,10 +28,20 @@ public Postings API, which needs no key:
 Region: the first call for a slug probes the US host and, on 404, the EU
 host; the answer is memoised per slug (and seeded from the directory).
 
-Blocks: none seen. If the pod's egress ever starts answering 403/429 (or
-HTML where JSON is expected), a worker moves its session to a sticky
-residential exit (config.lever_fallback_proxy()) for
-config.LEVER_BLOCK_COOLDOWN seconds — the woolworths/vinted shape.
+Blocks: none seen. If the pod's egress ever starts answering 403/429, the
+sessions move one fallback step down for config.LEVER_BLOCK_COOLDOWN
+seconds: since 2026-11-11 first to the gateway
+(config.LEVER_FALLBACK_EXIT = "gateway", exit_gateway.py: a fresh gateway address on
+nearly every request; the numbers are in config.py's Lever block), and only
+when that is refused too to a sticky residential exit
+(config.LEVER_FALLBACK_PROXY_COUNTRY). A call the gateway keeps failing
+makes its LAST retry on the residential exit, for that call only. When the
+cooldown ends the next call is back on the server's own IP. The same shape
+as the reed / soundcloud / woolworths transports. Two things never ride the
+gateway: a board document over its 10 MB cap (~500+ postings: the call
+moves to the residential exit after ONE gateway refusal, _over_gateway_limit)
+and a company's own website (site_html: hosts from user input would fill
+the gateway's routes).
 
 Failure taxonomy (scraper_errors, mapped to HTTP by route_glue):
   LeverUpstreamError  transport failure / 5xx              — retryable
@@ -48,8 +58,10 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
+import egress
 from scraper_errors import BadRequest, Blocked, NotFound, UpstreamError
 from lever import refs
+from scraper_utils import fanout, ladder, sessions
 
 IMPERSONATE = "chrome"
 TIMEOUT = 40
@@ -59,11 +71,11 @@ REGIONS = ("us", "eu")
 
 API_HEADERS = {
     "accept": "application/json, text/plain, */*",
-    "accept-language": "en-US,en;q=0.9",
+    "accept-language": egress.site_accept_language("lever"),
 }
 PAGE_HEADERS = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "accept-language": "en-US,en;q=0.9",
+    "accept-language": egress.site_accept_language("lever"),
     "upgrade-insecure-requests": "1",
 }
 
@@ -76,6 +88,11 @@ class LeverBlocked(LeverUpstreamError, Blocked):
     """403 / 429 or an HTML body where JSON was expected — retryable."""
 
 
+class LeverOverGatewayLimit(LeverUpstreamError):
+    """The gateway exit cannot carry this document (over its 10 MB cap) —
+    retried at once on the exit behind the gateway (_retrying)."""
+
+
 class LeverBadRequest(BadRequest):
     """Upstream 400 — the params were rejected. Never retried."""
 
@@ -85,49 +102,116 @@ class LeverNotFound(NotFound):
 
 
 # ---- sessions ------------------------------------------------------------------
-# One curl session per worker thread. Direct egress by default; after a block
-# the thread's sessions go through a sticky residential exit for a cooldown.
+# One session per worker thread (egress.new_session: curl_cffi, or the gateway
+# exit's look-alike). Direct egress by default; after a block the sessions
+# move down the fallback steps (config.lever_fallback_exits(): the gateway
+# exit, then a sticky residential exit) until `_fallback_until`, then go
+# back to direct.
 _local = threading.local()
 _fallback_until = 0.0
+_fallback_step = 1              # which fallback exit serves while the cooldown runs (1 = the first)
 _fallback_lock = threading.Lock()
 
 
-def _proxy_for_new_session():
+def _gateway_step(step):
+    """True when fallback step `step` is the gateway exit with another exit
+    configured behind it."""
+    exits = config.lever_fallback_exits()
+    return 0 < step < len(exits) and bool(config.gateway_exit(exits[step - 1]))
+
+
+def _step():
+    """The fallback step a session built NOW rides: 0 = the configured exit
+    (the server's own IP), 1, 2 = config.lever_fallback_proxy(step) while
+    the cooldown runs; one step past the gateway for the last retry of a
+    call (_retrying)."""
+    return ladder.current_step(_fallback_step, _fallback_until, _local, _gateway_step)
+
+
+def _proxy_for_new_session(step=None):
     forced = config.lever_proxy()
     if forced:
         return forced
-    if time.time() < _fallback_until:
-        return config.lever_fallback_proxy()
-    return None
+    step = _step() if step is None else step
+    return config.lever_fallback_proxy(step) if step else None
 
 
 def _session():
     sess = getattr(_local, "session", None)
+    step = _step()
+    if sess is not None and getattr(sess, "_lever_step", 0) != step:
+        # 2026-11-11: a session follows its step. Before, a thread that took
+        # the fallback exit during a cooldown stayed on it until that failed.
+        _drop_session()
+        sess = None
     if sess is None:
-        from curl_cffi import requests as curl_requests
-        sess = curl_requests.Session(impersonate=IMPERSONATE)
-        proxy = _proxy_for_new_session()
-        if proxy:
-            sess.proxies = {"http": proxy, "https": proxy}
+        # None (direct), a proxy URL, or the gateway exit ("gateway")
+        exit = _proxy_for_new_session(step)
+        sess = egress.new_session(exit, impersonate=IMPERSONATE)
+        sess._lever_step = step
+        sess._lever_gateway = bool(config.gateway_exit(exit))
         _local.session = sess
     return sess
 
 
+def _off_gateway_session():
+    """The session for a host that must never ride the gateway exit: a
+    company's own website (site_html). The gateway holds one route per host,
+    ~149 for every scraper together, so hosts that come from user input
+    stay off it. That is the thread's own session, unless it is a gateway
+    one: then a second session on the exit behind the gateway (the
+    residential one, what such a page rode during a cooldown before
+    2026-11-11), or on the server's own IP when nothing is behind it or
+    LEVER_PROXY_COUNTRY itself names the gateway."""
+    sess = _session()
+    if not getattr(sess, "_lever_gateway", False):
+        return sess
+    step = sess._lever_step
+    plain = getattr(_local, "plain_session", None)
+    if plain is not None and getattr(plain, "_lever_step", 0) != step:
+        _close(plain)
+        plain = None
+    if plain is None:
+        behind = step + 1 if _gateway_step(step) and not config.lever_proxy() else 0
+        plain = egress.new_session(config.lever_fallback_proxy(behind) if behind else None, impersonate=IMPERSONATE)
+        plain._lever_step = step
+        _local.plain_session = plain
+    return plain
+
+
+def _close(sess):
+    sessions.close_quietly(sess)
+
+
 def _drop_session():
-    sess = getattr(_local, "session", None)
-    _local.session = None
-    if sess is not None:
-        try:
-            sess.close()
-        except Exception:
-            pass
+    sess, plain = getattr(_local, "session", None), getattr(_local, "plain_session", None)
+    _local.session = _local.plain_session = None
+    _close(sess)
+    _close(plain)
 
 
 def _note_block():
-    global _fallback_until
-    if config.lever_fallback_proxy() is not None:
-        with _fallback_lock:
-            _fallback_until = time.time() + config.LEVER_BLOCK_COOLDOWN
+    """The exit this thread's session rides was refused: new sessions move
+    one fallback step down for a cooldown (own IP -> the gateway exit ->
+    residential; on the last step they stay there, each on a fresh exit).
+    No-op when no fallback is configured."""
+    global _fallback_until, _fallback_step
+    exits = config.lever_fallback_exits()
+    if not exits:
+        return
+    own = getattr(getattr(_local, "session", None), "_lever_step", _step())
+    if getattr(_local, "past_gateway", False) and own > (_fallback_step if time.time() < _fallback_until else 0):
+        # the exit borrowed behind the gateway for this call's last retry
+        # (_retrying) was refused: no verdict on the gateway, the step stays
+        return
+    step = min(own + 1, len(exits))
+    with _fallback_lock:
+        if time.time() >= _fallback_until or step > _fallback_step:
+            _fallback_step = step
+        _fallback_until = time.time() + config.LEVER_BLOCK_COOLDOWN
+    if len(exits) > 1:      # how often each step is refused is the number to watch
+        print(f"lever: exit refused, sessions on fallback step {_fallback_step} "
+              f"({exits[_fallback_step - 1]}) for {config.LEVER_BLOCK_COOLDOWN} s")
 
 
 def dump_debug(name, body):
@@ -186,16 +270,40 @@ def _json_of(resp, label):
 
 
 def _retrying(fn):
+    """Run fn() under the shared retry policy, each retry on a fresh session
+    / exit. While the sessions are on the gateway exit step the LAST retry of
+    a call rides the next step (the residential exit), for that call only:
+    a gateway failure then costs latency, not the call."""
     last = None
-    for attempt in range(1, config.MAX_RETRIES + 1):
-        try:
-            return fn()
-        except LeverUpstreamError as e:      # includes LeverBlocked
-            last = e
-            _drop_session()
-        if attempt < config.MAX_RETRIES:
-            time.sleep(config.RETRY_BACKOFF * attempt)
-    raise last
+    too_big = False
+    _local.past_gateway = False
+    try:
+        for attempt in range(1, config.MAX_RETRIES + 1):
+            try:
+                return fn()
+            except LeverUpstreamError as e:      # includes LeverBlocked
+                last = e
+                too_big = too_big or isinstance(e, LeverOverGatewayLimit)
+                _drop_session()
+            if attempt < config.MAX_RETRIES:
+                # read by _step() for the session built next; a document the
+                # gateway cannot carry leaves it at once, not on the last retry
+                _local.past_gateway = too_big or attempt + 1 == config.MAX_RETRIES
+                time.sleep(config.RETRY_BACKOFF * attempt)
+        raise last
+    finally:
+        _local.past_gateway = False     # _session() rebuilds on the thread's own step for the next call
+
+
+def _over_gateway_limit(error):
+    """True for the gateway's own HTTP 500 (exit_gateway.GatewayError "
+    gateway 500 InternalServerErrorException"): what it answers when the
+    target's body is over its 10 MB cap. Lever sends a board uncompressed,
+    ~19 KB a posting, so a board of ~500+ postings is over it (measured
+    2026-11-11: 16 of 16 requests for 7 boards of 857-4,651 postings, the 6
+    measured direct 15-55 MB, each refused in 1-18 s; a 5.9 MB board of 304
+    passed)."""
+    return type(error).__name__ == "GatewayError" and "gateway 500" in str(error)
 
 
 def get_json(url, params=None, *, label=None):
@@ -207,6 +315,8 @@ def get_json(url, params=None, *, label=None):
             resp = _session().get(url, params=query or None, headers=API_HEADERS, timeout=TIMEOUT,
                                   allow_redirects=True)
         except Exception as e:
+            if _over_gateway_limit(e):
+                raise LeverOverGatewayLimit(f"request failed: {type(e).__name__}: {e}")
             raise LeverUpstreamError(f"request failed: {type(e).__name__}: {e}")
         _classify(resp, label)
         return _json_of(resp, label)
@@ -313,9 +423,10 @@ def apply_html(slug, job_id, region=None):
 
 def site_html(url, timeout=20):
     """A third-party page (a company's own careers page, for resolve). Any
-    failure is None — the lookup just moves on to slug guesses."""
+    failure is None — the lookup just moves on to slug guesses. Never
+    through the gateway exit (_off_gateway_session)."""
     try:
-        resp = _session().get(url, headers=PAGE_HEADERS, timeout=timeout, allow_redirects=True)
+        resp = _off_gateway_session().get(url, headers=PAGE_HEADERS, timeout=timeout, allow_redirects=True)
     except Exception:
         return None
     if resp.status_code != 200:
@@ -332,24 +443,13 @@ _fanout = ThreadPoolExecutor(max_workers=FANOUT_WORKERS * 3, thread_name_prefix=
 
 
 def run_parallel(fns):
-    if not fns:
-        return []
-    if len(fns) == 1:
-        return [fns[0]()]
-    futures = [_fanout.submit(fn) for fn in fns[1:]]
-    first = fns[0]()
-    return [first] + [f.result() for f in futures]
+    return fanout.on_pool_caller_first(_fanout, fns)
 
 
 def soft(fn, default=None):
     """Wrap an optional lookup (the board page next to the API call): any
     upstream failure yields `default` instead of failing the endpoint."""
-    def run():
-        try:
-            return fn()
-        except (UpstreamError, BadRequest, NotFound):
-            return default
-    return run
+    return fanout.soft(fn, default, (UpstreamError, BadRequest, NotFound))
 
 
 if __name__ == "__main__":

@@ -40,6 +40,16 @@ def lever_proxy():
     return os.environ.get("LEVER_PROXY") or None
 
 
-def lever_fallback_proxy():
+def lever_fallback_proxy(*args, **kwargs):
     """Proxy to switch to after a block (None = keep the current route)."""
     return None
+
+
+# ---- added by the sync: defaults for a direct run ----
+def gateway_exit(exit=None):
+    return None
+
+
+def lever_fallback_exits():
+    return ()
+
